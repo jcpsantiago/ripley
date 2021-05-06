@@ -9,7 +9,8 @@
   (:require [ripley.live.protocols :as p]
             ripley.live.atom
             ripley.live.async
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.walk :as walk]))
 
 (defmulti to-source type)
 
@@ -96,19 +97,20 @@
   (c= (* %a %b))
   "
   [form]
-  (let [inputs
-        (seq (reduce
-              (fn [inputs x]
-                (if (str/starts-with? (name x) "%")
-                  (assoc inputs x (symbol (subs (name x) 1)))
-                  inputs))
-              {}
-              (filter symbol? (flatten form))))]
-    (assert (seq inputs)
-            "No inputs for computed source.")
-    `(computed (fn [~@(map first inputs)]
-                 ~form)
-               ~@(map second inputs))))
+  (let [inputs (volatile! {})]
+    (walk/prewalk
+     (fn [x]
+       (when (and (symbol? x)
+                  (str/starts-with? (name x) "%"))
+         (vswap! inputs assoc x (symbol (subs (name x) 1))))
+       x)
+     form)
+    (let [inputs @inputs]
+      (assert (seq inputs)
+              "No inputs for computed source.")
+      `(computed (fn [~@(map first inputs)]
+                   ~form)
+                 ~@(map second inputs)))))
 
 (defn listen-with-previous!
   "Utility for listening to a source while tracking the
@@ -160,8 +162,24 @@
                            (when (not= old-value new-value)
                              (doseq [listener @listeners]
                                (listener new-value))))))]
-         (->SplitSource source unlisten keyset listeners)))
+         (->SplitSource parent-source unlisten keyset listeners)))
      keysets)))
+
+(defrecord SourceWithListeners [listeners current-value-fn cleanup-fn]
+  p/Source
+  (current-value [_]
+    (current-value-fn))
+  (listen! [_ listener]
+    (swap! listeners conj listener)
+    #(swap! listeners disj listener))
+  (close! [_]
+    (reset! listeners #{})
+    (when cleanup-fn
+      (cleanup-fn)))
+  p/Writable
+  (write! [_ v]
+    (doseq [listener @listeners]
+      (listener v))))
 
 (defn source-with-listeners
   "Create new source that tracks listeners in a new atom.
@@ -175,25 +193,11 @@
   ([current-value-fn]
    (source-with-listeners current-value-fn nil))
   ([current-value-fn cleanup-fn]
-   (let [listeners (atom #{})]
-     [;; Source for the value
-      (reify
-        p/Source
-        (current-value [_]
-          (current-value-fn))
-        (listen! [_ listener]
-          (swap! listeners conj listener)
-          #(swap! listeners disj listener))
-        (close! [_]
-          (reset! listeners #{})
-          (when cleanup-fn
-            (cleanup-fn)))
-        p/Writable
-        (write! [_ v]
-          (doseq [listener @listeners]
-            (listener v))))
-
-      listeners])))
+   (let [listeners (atom #{})
+         source (->SourceWithListeners listeners
+                                       current-value-fn
+                                       cleanup-fn)]
+     [source listeners])))
 
 (defn use-state
   "Create a source for local (per page render) state.

@@ -202,52 +202,69 @@
         (render (p/current-value source))))
     (h/out! "</" container-element-name ">")))
 
-;; FIXME: scroll-sensor and infinite-scroll don't work at the moment
+
 (defn- scroll-sensor [callback]
   (let [g (name (gensym "__checkscroll"))
         id (name (gensym "__scrollsensor"))]
     (h/html
      [:<>
-      [:span]
-      [:script
+      [:span {:id id}]
+      (h/out! "<script>")
+      (h/out!
        "function " g "() {"
        " var yMax = window.innerHeight; "
        " var y = document.getElementById('" id "').getBoundingClientRect().top;"
        ;;" console.log('hep yMax: ', yMax, ', y: ', y); "
-       " if(0 <= y && y <= yMax) { " (h/register-callback callback) "}"
+       " if(0 <= y && y <= yMax) { "
+       ;;"console.log('fetching'); "
+       (h/register-callback callback) "}"
        "}\n"
-       "window.addEventListener('scroll', " g ");"]])))
+       "window.addEventListener('scroll', " g ");")
+      (h/out! "</script>")])))
+
+(defn default-loading-indicator []
+  (h/html
+   [:div "Loading..."]))
 
 (defn infinite-scroll [{:keys [render
                                container-element
                                child-element
                                next-batch ;; Function to return the next batch
-                               ]
+                               immediate?
+                               render-loading-indicator]
                         :or {container-element :span
-                             child-element :span}}]
-  (let [next-batch-ch (async/chan)
-        batches (async/chan)
+                             child-element :span
+                             immediate? true
+                             render-loading-indicator default-loading-indicator}}]
+  (let [initial-batch (when immediate? (next-batch))
+        [loading-source set-loading!] (source/use-state (not immediate?))
+        [batch-source set-batch!] (source/use-state initial-batch)
         render-batch (fn [items]
                        (doseq [item items]
                          (h/out! "<" (name child-element) ">")
                          (render item)
                          (h/out! "</" (name child-element) ">")))]
 
-    (go-loop [_ (<! next-batch-ch)]
-      (>! batches (next-batch))
-      (recur (<! next-batch-ch)))
-
     (h/out! "<" (name container-element) ">")
-    (println "calling render-batch")
-    (render-batch (next-batch))
-
-    (println "done rendering first batch")
-    #_(h/html
+    (h/html
      [:<>
-      [::h/live {:source (ch->source batches false)
+      [::h/live {:source batch-source
                  :component render-batch
-                 :patch :append}]
-      (scroll-sensor #(async/>!! next-batch-ch 1))])
+                 :patch :append}]])
+    (h/out! "</" (name container-element) ">")
 
-    (println "after html")
-    (h/out! "</" (name container-element) ">")))
+    (scroll-sensor
+     #(when (false? (p/current-value loading-source))
+        (set-loading! true)
+        (set-batch! (next-batch))
+        (set-loading! false)))
+
+    (h/html
+     [::h/when loading-source
+      (render-loading-indicator)])
+
+    ;; If not immediate, start fetching 1st batch after render
+    (when-not immediate?
+      (future
+        (set-batch! (next-batch))
+        (set-loading! false)))))

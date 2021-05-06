@@ -19,6 +19,9 @@
 (defn item [id]
   (hn-get "item/" id ".json"))
 
+(defn item [id]
+  (hn-get "item/" id ".json"))
+
 (defn top-stories-batches [batch-size]
   (let [[first-batch & batches] (partition-all batch-size (top-stories))
         batches (atom batches)]
